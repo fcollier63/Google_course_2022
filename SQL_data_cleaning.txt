@@ -1,0 +1,158 @@
+#Remove Nulls
+DELETE
+FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data
+WHERE ride_id IS NULL
+  OR date_time_of_ride_start IS NULL
+  OR bike_type IS NULL
+  OR date_time_of_ride_end IS NULL
+  OR customer_type IS NULL
+  OR start_station_name IS NULL
+  OR start_station_ID IS NULL
+  OR end_station_name IS NULL
+  OR end_station_id IS NULL;
+
+
+
+#Create a table with a calculated day_of_week field 
+WITH day_of_week_table AS (SELECT
+  ride_id, 
+  date_time_of_ride_start,
+  CASE WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 1 THEN 'Sunday'
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 2 THEN 'Monday'
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 3 THEN 'Tuesday'
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 4 THEN 'Wednesday'
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 5 THEN 'Thursday'
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 6 THEN 'Friday'
+
+WHEN EXTRACT(DAYOFWEEK FROM date_time_of_ride_start) = 7 THEN 'Saturday'
+END AS day_of_week
+  
+  FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data),
+
+#Create a table with a calculated ride_length_seconds field
+ride_length_table AS (SELECT
+  ride_id,
+  TIMESTAMP_DIFF(date_time_of_ride_end, date_time_of_ride_start, SECOND) AS ride_length_seconds,
+  FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data)
+
+#Select all required coloumns 
+SELECT cyclistic_data.ride_id, cyclistic_data.bike_type, cyclistic_data.date_time_of_ride_start, day_of_week_table.day_of_week, cyclistic_data.date_time_of_ride_end, ride_length_table.ride_length_seconds, cyclistic_data.start_station_name, cyclistic_data.start_station_id, cyclistic_data.end_station_name ,cyclistic_data.end_station_id, cyclistic_data.start_station_latitude, cyclistic_data.start_station_logitude AS start_station_longitude, cyclistic_data.end_station_latittude AS end_station_latitude, cyclistic_data.end_station_logitude AS end_station_longitude, cyclistic_data.customer_type
+    
+#Join both temporary columns with original table
+FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data
+JOIN day_of_week_table ON day_of_week_table.ride_id = cyclistic_data.ride_id JOIN ride_length_table ON ride_length_table.ride_id = cyclistic_data.ride_id
+ORDER BY date_time_of_ride_start;
+
+
+#Delete rows that had ride start time later than ride end time
+DELETE FROM `lyrical-drive-369815.Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_expanded_attributes`
+WHERE date_time_of_ride_start >= date_time_of_ride_end;
+
+
+#Calculate Quartile ranges and interquatile range
+SELECT
+  percentile_25,
+  percentile_75,
+  (percentile_75 - percentile_25) as iqr
+  FROM(
+    SELECT
+      APPROX_QUANTILES(ride_length_seconds, 4) [OFFSET (1)] AS percentile_25,
+      APPROX_QUANTILES(ride_length_seconds, 4) [OFFSET (3)] AS percentile_75
+    
+        
+    FROM `lyrical-drive-369815.Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_expanded_attributes`
+
+  );
+
+
+#Calculate Outliers by using IQR method 
+#Create temporary columnm that designates Journey types by which quartile they fall into
+WITH journey_type_table AS (SELECT
+  ride_id,
+  ride_length_seconds,
+  CASE 
+    WHEN ride_length_seconds < 368 THEN "Short"
+    WHEN ride_length_seconds >= 368 AND ride_length_seconds < 1146 THEN "Medium"
+    WHEN ride_length_seconds >= 1146 AND ride_length_seconds < 1146 +(1.5*778)THEN "Long"
+    WHEN ride_length_seconds >= 1146 +(1.5*778) AND ride_length_seconds < 18000 THEN "Very Long"
+    ELSE "5+ Hours"
+  END AS journey_type
+ 
+  FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_expanded_attributes
+)
+SELECT cyclistic_data_expanded_attributes.ride_id, cyclistic_data_expanded_attributes.bike_type, cyclistic_data_expanded_attributes.date_time_of_ride_start, cyclistic_data_expanded_attributes.day_of_week, cyclistic_data_expanded_attributes.date_time_of_ride_end, cyclistic_data_expanded_attributes.ride_length_seconds, journey_type_table.journey_type, cyclistic_data_expanded_attributes.start_station_name, cyclistic_data_expanded_attributes.start_station_id, cyclistic_data_expanded_attributes.end_station_name ,cyclistic_data_expanded_attributes.end_station_id, cyclistic_data_expanded_attributes.start_station_latitude, cyclistic_data_expanded_attributes.start_station_longitude, cyclistic_data_expanded_attributes.end_station_latitude, cyclistic_data_expanded_attributes.end_station_longitude, cyclistic_data_expanded_attributes.customer_type
+
+#Join temporary journey type column with origianl table
+FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_expanded_attributes
+JOIN journey_type_table ON journey_type_table.ride_id = cyclistic_data_expanded_attributes.ride_id;
+
+
+#Create temporary tables hold every start station and a Lat-Long coordinates
+CREATE TEMP TABLE tmp_start_station_location
+(
+  tmp_start_station_name STRING,
+  tmp_start_station_latitude FLOAT64,
+  tmp_start_station_longitude FLOAT64
+
+);
+#Calculates the (Mode) most common Lat-Long coordinate for each distinct start station id
+INSERT INTO tmp_start_station_location
+SELECT
+  start_station_name, start_station_latitude AS Mode_lat, start_station_longitude AS Mode_long 
+FROM (
+  SELECT
+    DISTINCT start_station_name, start_station_latitude, start_station_longitude, ROW_NUMBER() OVER (PARTITION BY start_station_name ORDER BY COUNT(start_station_longitude) DESC) rn1, ROW_NUMBER() OVER (PARTITION BY start_station_name ORDER BY COUNT(start_station_latitude) DESC) rn2
+  FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_journey_binned
+
+  GROUP BY
+    start_station_name, start_station_latitude, start_station_longitude)
+WHERE
+  rn1 = 1 AND rn2 = 1
+ORDER BY
+  start_station_name ASC;
+
+
+#Create temporary tables hold every end station and a Lat-Long coordinates
+
+CREATE TEMP TABLE tmp_end_station_location
+(
+  tmp_end_station_name STRING,
+  tmp_end_station_latitude FLOAT64,
+  tmp_end_station_longitude FLOAT64
+
+);
+#Calculates the (Mode) most common Lat-Long coordinate for each distinct end station id
+
+INSERT INTO tmp_end_station_location
+SELECT
+  start_station_name, start_station_latitude AS Mode_lat, start_station_longitude AS Mode_long 
+FROM (
+  SELECT
+    DISTINCT start_station_name, start_station_latitude, start_station_longitude, ROW_NUMBER() OVER (PARTITION BY start_station_name ORDER BY COUNT(start_station_longitude) DESC) rn1, ROW_NUMBER() OVER (PARTITION BY start_station_name ORDER BY COUNT(start_station_latitude) DESC) rn2
+  FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_journey_binned
+
+  GROUP BY
+    start_station_name, start_station_latitude, start_station_longitude)
+WHERE
+  rn1 = 1 AND rn2 = 1
+ORDER BY
+  start_station_name ASC;
+
+
+
+
+#Joins start and end station average Lat-Long Coordinates to main table
+/*
+SELECT * EXCEPT(tmp_start_station_name)
+FROM Cyclistic_Ride_Data_2021_11_to_2022_10.cyclistic_data_journey_binned
+JOIN tmp_start_station_location ON tmp_start_station_location.tmp_start_station_name = cyclistic_data_journey_binned.start_station_name
+ORDER BY start_station_latitude;
+
+
+SELECT * EXCEPT(tmp_end_station_name)
+FROM Cyclistic_Ride_Data_2021_11_to_2022_10.tmp_start_station_names
+JOIN tmp_end_station_location ON tmp_end_station_location.tmp_end_station_name = tmp_start_station_names.end_station_name
+#WHERE start_station_name = "Streeter Dr & Grand Ave"
+ORDER BY start_station_latitude;
+
+*/
